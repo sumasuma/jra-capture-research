@@ -25,7 +25,7 @@ PLACE_SLUG = {
 PLACE_CODE = {name: i + 1 for i, name in enumerate(PLACE_SLUG)}
 CODE_PLACE = {v: k for k, v in PLACE_CODE.items()}
 SURFACE_MAP = {"芝": 1, "ダ": 2}
-LAST3_METRICS = {"finish", "margin", "time_sec", "corrected_time", "corner4", "final3f"}
+LAST3_METRICS = {"finish", "margin", "time_sec", "corrected_time", "corner4", "final3f", "pci", "rpci"}
 
 CLASS_MAP = {23: 1, 43: 2, 67: 3, 115: 4, 131: 4, 147: 5, 163: 5, 179: 6, 195: 7}
 SEX_MAP = {"牡": 1, "牝": 2, "セ": 3, "騙": 3}
@@ -40,12 +40,13 @@ RAW_COLUMNS = [
     "枠番", "重量コード", "年齢限定(競走種別コード)", "トラックコード(JV)",
 ]
 
+# Memory-safe simple97 family: the empirically stronger adult-dirt reconstruction
+# used eight history metrics. Current bodyweight/carried remain current-condition
+# features, but are not duplicated into all four historical blocks.
 HIST_METRICS = [
-    "finish", "margin", "time_sec", "corrected_time", "corner4",
-    "final3f", "bodyweight", "carried", "pci", "rpci", "speed1000",
+    "finish", "margin", "time_sec", "corrected_time",
+    "corner4", "final3f", "pci", "rpci",
 ]
-
-MIN_BEST = {"finish", "margin", "time_sec", "corner4", "final3f", "speed1000"}
 
 RANK_GRID = [
     {"leaves": 7, "depth": 3, "minc": 30, "col": 0.8, "l2": 1},
@@ -270,13 +271,6 @@ def add_group_features_to_target(base, adult, mask, keys, prefix, add_last3=Fals
         mean = csum / ccnt.replace(0, np.nan)
         adult[f"{prefix}_mean_{m}"] = mean.loc[mask].to_numpy(dtype="float32")
 
-        sh = shifted
-        if m in MIN_BEST:
-            best = sh.groupby(key_series, sort=False, dropna=False).cummin()
-        else:
-            best = sh.groupby(key_series, sort=False, dropna=False).cummax()
-        adult[f"{prefix}_best_{m}"] = best.loc[mask].to_numpy(dtype="float32")
-
         if add_last3 and m in LAST3_METRICS:
             last3 = gb[m].transform(lambda s: s.shift(1).rolling(3, min_periods=1).mean())
             adult[f"{prefix}_last3_{m}"] = last3.loc[mask].to_numpy(dtype="float32")
@@ -371,6 +365,9 @@ def build_features(base: pd.DataFrame, root: Path):
         "history_rows_completed_only": True,
         "odds_popularity_used": False,
         "compact_numeric_loader": True,
+        "feature_family": "simple97_memory_safe",
+        "history_aggregates": ["last", "mean"],
+        "g_extra_aggregate": "last3",
         "class_map": CLASS_MAP,
         "distance_bands": {"0": "<=1299", "1": "1300-1699", "2": "1700-1999", "3": ">=2000"},
         "groups": {
