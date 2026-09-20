@@ -260,7 +260,10 @@ def build_features(base: pd.DataFrame, root: Path):
     features = current + ["g_n", "b_n", "e_n", "x_n"] + hist
     features = list(dict.fromkeys([c for c in features if c in adult.columns]))
 
-    out = adult[keep_raw + features].copy()
+    output_columns = keep_raw + [c for c in features if c not in keep_raw]
+    out = adult[output_columns].copy()
+    if out.columns.duplicated().any():
+        raise RuntimeError("duplicate feature columns detected")
     for c in features:
         out[c] = pd.to_numeric(out[c], errors="coerce").astype("float32")
     out.to_pickle(cache)
