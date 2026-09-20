@@ -1,3 +1,4 @@
+import gc
 import hashlib
 import json
 import math
@@ -274,11 +275,17 @@ def add_group_features_to_target(base, adult, mask, keys, prefix, add_last3=Fals
         if add_last3 and m in LAST3_METRICS:
             last3 = gb[m].transform(lambda s: s.shift(1).rolling(3, min_periods=1).mean())
             adult[f"{prefix}_last3_{m}"] = last3.loc[mask].to_numpy(dtype="float32")
+            del last3
+
+        del shifted, valid, filled, csum, ccnt, mean
+        gc.collect()
+    del gb
+    gc.collect()
     return adult
 
 
 def build_features(base: pd.DataFrame, root: Path):
-    cache = root / "cache" / "adult_dirt_features_v2.pkl"
+    cache = root / "cache" / "adult_dirt_features_simple97_v2.pkl"
     if cache.exists():
         print(f"[features] using cache {cache}", flush=True)
         return pd.read_pickle(cache)
