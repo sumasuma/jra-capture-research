@@ -32,9 +32,9 @@ SEX_MAP = {"牡": 1, "牝": 2, "セ": 3, "騙": 3}
 TRACK_STATE_MAP = {"良": 1, "稍": 2, "重": 3, "不": 4}
 
 RAW_COLUMNS = [
-    "年", "月", "日", "place_code", "レース番号", "クラスコード", "芝・ダ",
-    "トラックコード", "distance", "馬場状態", "horse_id", "性別", "年齢",
-    "斤量", "頭数", "horse_no", "確定着順", "異常コード", "着差タイム",
+    "年", "月", "日", "場所", "レース番号", "クラスコード", "芝・ダ",
+    "トラックコード", "距離", "馬場状態", "馬名", "性別", "年齢",
+    "斤量", "頭数", "馬番", "確定着順", "異常コード", "着差タイム",
     "走破タイム(秒)", "補正タイム", "通過順4角", "上がり3Fタイム",
     "馬体重", "血統登録番号", "レースID(新)", "PCI", "RPCI",
     "枠番", "重量コード", "年齢限定(競走種別コード)", "トラックコード(JV)",
@@ -177,15 +177,15 @@ def load_history(zip_path: Path, root: Path):
             n["year_full"] = np.where(year < 100, 2000 + year, year).astype("int16")
             n["month"] = num("月").fillna(0).astype("int8")
             n["day"] = num("日").fillna(0).astype("int8")
-            n["place_code"] = d["place_code"].map(PLACE_CODE).fillna(0).astype("int8")
+            n["place_code"] = d["場所"].map(PLACE_CODE).fillna(0).astype("int8")
             n["surface_code"] = d["芝・ダ"].map(SURFACE_MAP).fillna(0).astype("int8")
-            n["distance"] = num("distance").fillna(0).astype("int16")
+            n["distance"] = num("距離").fillna(0).astype("int16")
             n["class_code"] = num("クラスコード").fillna(0).astype("int16")
             n["class_level"] = n["class_code"].map(CLASS_MAP).fillna(0).astype("int8")
             n["age"] = num("年齢").fillna(0).astype("int8")
             n["carried"] = num("斤量").astype("float32")
             n["field_n"] = num("頭数").fillna(0).astype("int8")
-            n["horse_no"] = num("horse_no").fillna(0).astype("int8")
+            n["horse_no"] = num("馬番").fillna(0).astype("int8")
             n["finish"] = num("確定着順").fillna(0).astype("int8")
             n["margin"] = num("着差タイム").astype("float32")
             n["time_sec"] = num("走破タイム(秒)").astype("float32")
@@ -207,7 +207,7 @@ def load_history(zip_path: Path, root: Path):
 
             horse = num("血統登録番号")
             fb = (
-                pd.util.hash_pandas_object(d["horse_id"].fillna(""), index=False).to_numpy(dtype="uint64")
+                pd.util.hash_pandas_object(d["馬名"].fillna(""), index=False).to_numpy(dtype="uint64")
                 & np.uint64(0x7FFFFFFFFFFFFFFF)
             ).astype("int64")
             harr = np.where(
