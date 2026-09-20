@@ -105,7 +105,52 @@ def load_history(zip_path: Path, root: Path):
         return pd.read_pickle(cache)
 
     parts = []
-    with zipfile.ZipFile(zip_path) as z:
+    source_zip = zip_path
+    with zipfile.ZipFile(zip_path) as outer:
+        direct_csvs = [n for n in outer.namelist() if n.upper().endswith(".CSV")]
+        direct_ok = False
+        for name in direct_csvs[:5]:
+            try:
+                with outer.open(name) as fh:
+                    cols = set(pd.read_csv(fh, encoding="cp932", nrows=0).columns)
+                if set(RAW_COLUMNS).issubset(cols):
+                    direct_ok = True
+                    break
+            except Exception:
+                pass
+        if not direct_ok:
+            nested_infos = sorted(
+                [i for i in outer.infolist() if i.filename.lower().endswith(".zip")],
+                key=lambda i: i.file_size,
+                reverse=True,
+            )
+            for info in nested_infos:
+                candidate = root / "cache" / Path(info.filename).name
+                if not candidate.exists() or candidate.stat().st_size != info.file_size:
+                    print(f"[load] extracting nested zip {info.filename} bytes={info.file_size}", flush=True)
+                    with outer.open(info) as src, candidate.open("wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                try:
+                    with zipfile.ZipFile(candidate) as nz:
+                        names = [n for n in nz.namelist() if n.upper().endswith(".CSV")]
+                        matched = False
+                        for name in names[:10]:
+                            try:
+                                with nz.open(name) as fh:
+                                    cols = set(pd.read_csv(fh, encoding="cp932", nrows=0).columns)
+                                if set(RAW_COLUMNS).issubset(cols):
+                                    matched = True
+                                    break
+                            except Exception:
+                                pass
+                    if matched:
+                        source_zip = candidate
+                        print(f"[load] selected nested source {candidate.name}", flush=True)
+                        break
+                except Exception:
+                    continue
+
+    with zipfile.ZipFile(source_zip) as z:
         csvs = [n for n in z.namelist() if n.upper().endswith(".CSV")]
         for i, name in enumerate(csvs, 1):
             with z.open(name) as fh:
@@ -117,7 +162,7 @@ def load_history(zip_path: Path, root: Path):
             if i % 50 == 0:
                 print(f"[load] {i}/{len(csvs)} files", flush=True)
     if not parts:
-        raise RuntimeError("No CSVs could be loaded from dataset ZIP")
+        raise RuntimeError("No horse-level CSVs could be loaded from dataset ZIP or nested ZIPs")
 
     df = pd.concat(parts, ignore_index=True)
     del parts
