@@ -22,15 +22,19 @@ PLACE_SLUG = {
     "新潟": "niigata", "東京": "tokyo", "中山": "nakayama",
     "中京": "chukyo", "京都": "kyoto", "阪神": "hanshin", "小倉": "kokura",
 }
+PLACE_CODE = {name: i + 1 for i, name in enumerate(PLACE_SLUG)}
+CODE_PLACE = {v: k for k, v in PLACE_CODE.items()}
+SURFACE_MAP = {"芝": 1, "ダ": 2}
+LAST3_METRICS = {"finish", "margin", "time_sec", "corrected_time", "corner4", "final3f"}
 
 CLASS_MAP = {23: 1, 43: 2, 67: 3, 115: 4, 131: 4, 147: 5, 163: 5, 179: 6, 195: 7}
 SEX_MAP = {"牡": 1, "牝": 2, "セ": 3, "騙": 3}
 TRACK_STATE_MAP = {"良": 1, "稍": 2, "重": 3, "不": 4}
 
 RAW_COLUMNS = [
-    "年", "月", "日", "場所", "レース番号", "クラスコード", "芝・ダ",
-    "トラックコード", "距離", "馬場状態", "馬名", "性別", "年齢",
-    "斤量", "頭数", "馬番", "確定着順", "異常コード", "着差タイム",
+    "年", "月", "日", "place_code", "レース番号", "クラスコード", "芝・ダ",
+    "トラックコード", "distance", "馬場状態", "horse_id", "性別", "年齢",
+    "斤量", "頭数", "horse_no", "確定着順", "異常コード", "着差タイム",
     "走破タイム(秒)", "補正タイム", "通過順4角", "上がり3Fタイム",
     "馬体重", "血統登録番号", "レースID(新)", "PCI", "RPCI",
     "枠番", "重量コード", "年齢限定(競走種別コード)", "トラックコード(JV)",
@@ -99,12 +103,12 @@ def dist_band(x):
 
 
 def load_history(zip_path: Path, root: Path):
-    cache = root / "cache" / "history_base.pkl"
+    cache = root / "cache" / "history_base_compact.pkl"
     cache.parent.mkdir(parents=True, exist_ok=True)
     if cache.exists():
+        print(f"[load] using compact cache {cache}", flush=True)
         return pd.read_pickle(cache)
 
-    parts = []
     source_zip = zip_path
     with zipfile.ZipFile(zip_path) as outer:
         direct_csvs = [n for n in outer.namelist() if n.upper().endswith(".CSV")]
@@ -150,6 +154,7 @@ def load_history(zip_path: Path, root: Path):
                 except Exception:
                     continue
 
+    parts = []
     with zipfile.ZipFile(source_zip) as z:
         csvs = [n for n in z.namelist() if n.upper().endswith(".CSV")]
         for i, name in enumerate(csvs, 1):
@@ -158,140 +163,184 @@ def load_history(zip_path: Path, root: Path):
                     d = pd.read_csv(fh, encoding="cp932", usecols=RAW_COLUMNS, low_memory=False)
                 except Exception:
                     continue
-            parts.append(d)
+
+            finish = pd.to_numeric(d["確定着順"], errors="coerce")
+            d = d.loc[finish > 0].copy()
+            if d.empty:
+                continue
+
+            n = pd.DataFrame(index=d.index)
+            def num(col):
+                return pd.to_numeric(d[col], errors="coerce")
+
+            year = num("年")
+            n["year_full"] = np.where(year < 100, 2000 + year, year).astype("int16")
+            n["month"] = num("月").fillna(0).astype("int8")
+            n["day"] = num("日").fillna(0).astype("int8")
+            n["place_code"] = d["place_code"].map(PLACE_CODE).fillna(0).astype("int8")
+            n["surface_code"] = d["芝・ダ"].map(SURFACE_MAP).fillna(0).astype("int8")
+            n["distance"] = num("distance").fillna(0).astype("int16")
+            n["class_code"] = num("クラスコード").fillna(0).astype("int16")
+            n["class_level"] = n["class_code"].map(CLASS_MAP).fillna(0).astype("int8")
+            n["age"] = num("年齢").fillna(0).astype("int8")
+            n["carried"] = num("斤量").astype("float32")
+            n["field_n"] = num("頭数").fillna(0).astype("int8")
+            n["horse_no"] = num("horse_no").fillna(0).astype("int8")
+            n["finish"] = num("確定着順").fillna(0).astype("int8")
+            n["margin"] = num("着差タイム").astype("float32")
+            n["time_sec"] = num("走破タイム(秒)").astype("float32")
+            n["corrected_time"] = num("補正タイム").astype("float32")
+            n["corner4"] = num("通過順4角").astype("float32")
+            n["final3f"] = num("上がり3Fタイム").astype("float32")
+            n["bodyweight"] = num("馬体重").astype("float32")
+            n["pci"] = num("PCI").astype("float32")
+            n["rpci"] = num("RPCI").astype("float32")
+            n["frame_no"] = num("枠番").fillna(0).astype("int8")
+            n["weight_code"] = num("重量コード").astype("float32")
+            n["age_limit_code"] = num("年齢限定(競走種別コード)").astype("float32")
+            n["track_code_jv"] = num("トラックコード(JV)").astype("float32")
+            n["track_state_code"] = d["馬場状態"].map(TRACK_STATE_MAP).fillna(0).astype("int8")
+            n["sex_code"] = d["性別"].map(SEX_MAP).fillna(0).astype("int8")
+
+            race = num("レースID(新)")
+            n["race_id"] = race.fillna(0).astype("int64")
+
+            horse = num("血統登録番号")
+            fb = (
+                pd.util.hash_pandas_object(d["horse_id"].fillna(""), index=False).to_numpy(dtype="uint64")
+                & np.uint64(0x7FFFFFFFFFFFFFFF)
+            ).astype("int64")
+            harr = np.where(
+                horse.notna().to_numpy(),
+                horse.fillna(0).astype("int64").to_numpy(),
+                -fb - 1,
+            )
+            n["horse_id"] = harr.astype("int64")
+
+            dates = pd.to_datetime(
+                dict(year=n["year_full"], month=n["month"], day=n["day"]), errors="coerce"
+            )
+            n["date_days"] = (dates - pd.Timestamp("2000-01-01")).dt.days.fillna(-1).astype("int32")
+            n["dist_band"] = n["distance"].map(dist_band).fillna(-1).astype("int8")
+            n["draw_pct"] = (n["frame_no"].astype("float32") / 8.0).astype("float32")
+            n["gate_pct"] = (
+                n["horse_no"].astype("float32") / n["field_n"].replace(0, np.nan).astype("float32")
+            ).astype("float32")
+            n["speed1000"] = (
+                n["time_sec"] / n["distance"].replace(0, np.nan).astype("float32") * 1000.0
+            ).astype("float32")
+            n["target_win"] = (n["finish"] == 1).astype("int8")
+            n["target_top2"] = n["finish"].between(1, 2).astype("int8")
+            n["target_top3"] = n["finish"].between(1, 3).astype("int8")
+            n = n[n["race_id"] > 0]
+            parts.append(n.reset_index(drop=True))
+
             if i % 50 == 0:
-                print(f"[load] {i}/{len(csvs)} files", flush=True)
+                rows = sum(len(x) for x in parts)
+                print(f"[load] {i}/{len(csvs)} files compact_rows={rows:,}", flush=True)
+
     if not parts:
         raise RuntimeError("No horse-level CSVs could be loaded from dataset ZIP or nested ZIPs")
 
-    df = pd.concat(parts, ignore_index=True)
+    df = pd.concat(parts, ignore_index=True, copy=False)
     del parts
-
-    numeric_cols = [
-        "年", "月", "日", "レース番号", "クラスコード", "距離", "年齢", "斤量",
-        "頭数", "馬番", "確定着順", "着差タイム", "走破タイム(秒)", "補正タイム",
-        "通過順4角", "上がり3Fタイム", "馬体重", "PCI", "RPCI", "枠番",
-        "重量コード", "年齢限定(競走種別コード)", "トラックコード(JV)", "血統登録番号",
-    ]
-    for c in numeric_cols:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-
-    df["year_full"] = np.where(df["年"] < 100, 2000 + df["年"], df["年"]).astype("int16")
-    df["_date"] = pd.to_datetime(dict(year=df["year_full"], month=df["月"], day=df["日"]), errors="coerce")
-    df["race_id"] = df["レースID(新)"].astype(str).str.replace(r"\.0$", "", regex=True)
-    df["horse_id"] = df["血統登録番号"].astype("Int64").astype(str)
-    missing_horse = df["血統登録番号"].isna()
-    df.loc[missing_horse, "horse_id"] = "N:" + df.loc[missing_horse, "馬名"].astype(str)
-
-    df["class_level"] = df["クラスコード"].map(CLASS_MAP)
-    df["finish"] = pd.to_numeric(df["確定着順"], errors="coerce")
-    df["margin"] = pd.to_numeric(df["着差タイム"], errors="coerce")
-    df["time_sec"] = pd.to_numeric(df["走破タイム(秒)"], errors="coerce")
-    df["corrected_time"] = pd.to_numeric(df["補正タイム"], errors="coerce")
-    df["corner4"] = pd.to_numeric(df["通過順4角"], errors="coerce")
-    df["final3f"] = pd.to_numeric(df["上がり3Fタイム"], errors="coerce")
-    df["bodyweight"] = pd.to_numeric(df["馬体重"], errors="coerce")
-    df["carried"] = pd.to_numeric(df["斤量"], errors="coerce")
-    df["pci"] = pd.to_numeric(df["PCI"], errors="coerce")
-    df["rpci"] = pd.to_numeric(df["RPCI"], errors="coerce")
-    df["speed1000"] = df["time_sec"] / pd.to_numeric(df["距離"], errors="coerce") * 1000.0
-    df["dist_band"] = pd.to_numeric(df["距離"], errors="coerce").map(dist_band)
-    df["sex_code"] = df["性別"].map(SEX_MAP)
-    df["track_state_code"] = df["馬場状態"].map(TRACK_STATE_MAP)
-    df["draw_pct"] = pd.to_numeric(df["枠番"], errors="coerce") / 8.0
-    df["gate_pct"] = pd.to_numeric(df["馬番"], errors="coerce") / pd.to_numeric(df["頭数"], errors="coerce")
-    df["target_win"] = (df["finish"] == 1).astype("int8")
-    df["target_top2"] = (df["finish"].between(1, 2)).astype("int8")
-    df["target_top3"] = (df["finish"].between(1, 3)).astype("int8")
-
-    # Research history uses only completed rows before building history features.
-    df = df[df["finish"] > 0].copy()
-    df.sort_values(["horse_id", "_date", "race_id", "馬番"], inplace=True)
+    df.sort_values(["horse_id", "date_days", "race_id", "horse_no"], inplace=True)
     df.reset_index(drop=True, inplace=True)
     df.to_pickle(cache)
-    print(f"[load] completed rows={len(df):,}", flush=True)
+    print(
+        f"[load] compact completed rows={len(df):,} memory_mb={df.memory_usage(deep=True).sum()/1e6:.1f}",
+        flush=True,
+    )
     return df
 
 
-def add_group_features(df: pd.DataFrame, keys, prefix: str, add_last3=False):
-    gb = df.groupby(keys, sort=False, observed=True)
-    df[f"{prefix}_n"] = gb.cumcount().astype("int32")
+def add_group_features_to_target(base, adult, mask, keys, prefix, add_last3=False):
+    key_series = [base[k] for k in keys]
+    gb = base.groupby(keys, sort=False, observed=True, dropna=False)
+    adult[f"{prefix}_n"] = gb.cumcount().loc[mask].to_numpy(dtype="int32")
 
     for m in HIST_METRICS:
         shifted = gb[m].shift(1)
-        df[f"{prefix}_last_{m}"] = shifted.astype("float32")
+        adult[f"{prefix}_last_{m}"] = shifted.loc[mask].to_numpy(dtype="float32")
 
-        valid = df[m].notna().astype("int32")
-        filled = df[m].fillna(0.0).astype("float64")
-        csum = filled.groupby([df[k] for k in keys], sort=False).cumsum() - filled
-        ccnt = valid.groupby([df[k] for k in keys], sort=False).cumsum() - valid
+        valid = base[m].notna().astype("int32")
+        filled = base[m].fillna(0.0).astype("float64")
+        csum = filled.groupby(key_series, sort=False, dropna=False).cumsum() - filled
+        ccnt = valid.groupby(key_series, sort=False, dropna=False).cumsum() - valid
         mean = csum / ccnt.replace(0, np.nan)
-        df[f"{prefix}_mean_{m}"] = mean.astype("float32")
+        adult[f"{prefix}_mean_{m}"] = mean.loc[mask].to_numpy(dtype="float32")
 
-        tmp_name = f"__sh_{prefix}_{m}"
-        df[tmp_name] = shifted
-        gb2 = df.groupby(keys, sort=False, observed=True)[tmp_name]
+        sh = shifted
         if m in MIN_BEST:
-            best = gb2.cummin()
+            best = sh.groupby(key_series, sort=False, dropna=False).cummin()
         else:
-            best = gb2.cummax()
-        df[f"{prefix}_best_{m}"] = best.astype("float32")
-        df.drop(columns=[tmp_name], inplace=True)
+            best = sh.groupby(key_series, sort=False, dropna=False).cummax()
+        adult[f"{prefix}_best_{m}"] = best.loc[mask].to_numpy(dtype="float32")
 
-        if add_last3:
-            # This transform is intentionally explicit and deterministic.
+        if add_last3 and m in LAST3_METRICS:
             last3 = gb[m].transform(lambda s: s.shift(1).rolling(3, min_periods=1).mean())
-            df[f"{prefix}_last3_{m}"] = last3.astype("float32")
-    return df
+            adult[f"{prefix}_last3_{m}"] = last3.loc[mask].to_numpy(dtype="float32")
+    return adult
 
 
 def build_features(base: pd.DataFrame, root: Path):
     cache = root / "cache" / "adult_dirt_features_v2.pkl"
     if cache.exists():
+        print(f"[features] using cache {cache}", flush=True)
         return pd.read_pickle(cache)
 
-    df = base.copy()
+    mask = (
+        (base["surface_code"] == 2)
+        & (base["age"] >= 3)
+        & (base["class_level"] > 0)
+        & (base["place_code"] > 0)
+    )
+    raw_keep = [
+        "race_id", "year_full", "place_code", "distance", "horse_no", "horse_id",
+        "finish", "target_win", "target_top2", "target_top3", "class_level",
+        "month", "age", "carried", "field_n", "bodyweight", "frame_no",
+        "weight_code", "age_limit_code", "track_code_jv", "draw_pct", "gate_pct",
+        "sex_code", "track_state_code", "date_days",
+    ]
+    adult = base.loc[mask, raw_keep].copy().reset_index(drop=True)
+    print(
+        f"[features] adult target rows={len(adult):,} base_mb={base.memory_usage(deep=True).sum()/1e6:.1f}",
+        flush=True,
+    )
+
     print("[features] g", flush=True)
-    df = add_group_features(df, ["horse_id"], "g", add_last3=True)
+    adult = add_group_features_to_target(base, adult, mask, ["horse_id"], "g", add_last3=True)
     print("[features] b", flush=True)
-    df = add_group_features(df, ["horse_id", "芝・ダ", "dist_band"], "b")
+    adult = add_group_features_to_target(
+        base, adult, mask, ["horse_id", "surface_code", "dist_band"], "b"
+    )
     print("[features] e", flush=True)
-    df = add_group_features(df, ["horse_id", "場所", "芝・ダ", "距離"], "e")
+    adult = add_group_features_to_target(
+        base, adult, mask, ["horse_id", "place_code", "surface_code", "distance"], "e"
+    )
     print("[features] x", flush=True)
-    df = add_group_features(df, ["horse_id", "場所", "芝・ダ", "距離", "class_level"], "x")
+    adult = add_group_features_to_target(
+        base, adult, mask,
+        ["horse_id", "place_code", "surface_code", "distance", "class_level"], "x"
+    )
 
-    prev_date = df.groupby("horse_id", sort=False)["_date"].shift(1)
-    df["days_since"] = (df["_date"] - prev_date).dt.days.astype("float32")
-    df["body_change"] = (df["bodyweight"] - df["g_last_bodyweight"]).astype("float32")
-    df["carry_change"] = (df["carried"] - df["g_last_carried"]).astype("float32")
+    prev_days = base.groupby("horse_id", sort=False)["date_days"].shift(1)
+    adult["days_since"] = (
+        base.loc[mask, "date_days"].to_numpy(dtype="float32")
+        - prev_days.loc[mask].to_numpy(dtype="float32")
+    )
+    adult["body_change"] = (
+        adult["bodyweight"].astype("float32") - adult["g_last_bodyweight"].astype("float32")
+    )
+    adult["carry_change"] = (
+        adult["carried"].astype("float32") - adult["g_last_carried"].astype("float32")
+    )
 
-    adult = df[
-        (df["芝・ダ"] == "ダ")
-        & (pd.to_numeric(df["年齢"], errors="coerce") >= 3)
-        & (df["class_level"].notna())
-        & (df["場所"].isin(PLACE_SLUG))
-    ].copy()
-
-    # Race-level history coverage from horse-level prior-history counts.
     for pref in ["g", "b", "e", "x"]:
         adult[f"race_{pref}_cov"] = adult.groupby("race_id", sort=False)[f"{pref}_n"].transform(
             lambda s: (s > 0).mean()
         ).astype("float32")
 
-    adult["month"] = pd.to_numeric(adult["月"], errors="coerce").astype("float32")
-    adult["distance"] = pd.to_numeric(adult["距離"], errors="coerce").astype("float32")
-    adult["age"] = pd.to_numeric(adult["年齢"], errors="coerce").astype("float32")
-    adult["field_n"] = pd.to_numeric(adult["頭数"], errors="coerce").astype("float32")
-    adult["horse_no"] = pd.to_numeric(adult["馬番"], errors="coerce").astype("float32")
-    adult["frame_no"] = pd.to_numeric(adult["枠番"], errors="coerce").astype("float32")
-    adult["weight_code"] = pd.to_numeric(adult["重量コード"], errors="coerce").astype("float32")
-    adult["age_limit_code"] = pd.to_numeric(adult["年齢限定(競走種別コード)"], errors="coerce").astype("float32")
-    adult["track_code_jv"] = pd.to_numeric(adult["トラックコード(JV)"], errors="coerce").astype("float32")
-
-    keep_raw = [
-        "race_id", "year_full", "場所", "距離", "馬番", "馬名", "horse_id",
-        "finish", "target_win", "target_top2", "target_top3", "class_level",
-    ]
     current = [
         "month", "distance", "age", "carried", "field_n", "horse_no", "bodyweight",
         "frame_no", "weight_code", "age_limit_code", "track_code_jv", "class_level",
@@ -299,24 +348,29 @@ def build_features(base: pd.DataFrame, root: Path):
         "sex_code", "track_state_code", "race_g_cov", "race_b_cov", "race_e_cov", "race_x_cov",
     ]
     hist = [
-        c for c in adult.columns
-        if c.startswith(("g_", "b_", "e_", "x_")) and c not in {"g_n", "b_n", "e_n", "x_n"}
+        col for col in adult.columns
+        if col.startswith(("g_", "b_", "e_", "x_")) and col not in {"g_n", "b_n", "e_n", "x_n"}
     ]
     features = current + ["g_n", "b_n", "e_n", "x_n"] + hist
-    features = list(dict.fromkeys([c for c in features if c in adult.columns]))
+    features = list(dict.fromkeys([col for col in features if col in adult.columns]))
 
-    output_columns = keep_raw + [c for c in features if c not in keep_raw]
+    keep_raw = [
+        "race_id", "year_full", "place_code", "distance", "horse_no", "horse_id",
+        "finish", "target_win", "target_top2", "target_top3", "class_level",
+    ]
+    output_columns = keep_raw + [col for col in features if col not in keep_raw]
     out = adult[output_columns].copy()
     if out.columns.duplicated().any():
         raise RuntimeError("duplicate feature columns detected")
-    for c in features:
-        out[c] = pd.to_numeric(out[c], errors="coerce").astype("float32")
+    for col in features:
+        out[col] = pd.to_numeric(out[col], errors="coerce").astype("float32")
     out.to_pickle(cache)
 
     spec = {
         "version": "ADULT_DIRT_V2",
         "history_rows_completed_only": True,
         "odds_popularity_used": False,
+        "compact_numeric_loader": True,
         "class_map": CLASS_MAP,
         "distance_bands": {"0": "<=1299", "1": "1300-1699", "2": "1700-1999", "3": ">=2000"},
         "groups": {
@@ -330,7 +384,11 @@ def build_features(base: pd.DataFrame, root: Path):
     (root / "output" / "FEATURE_SPEC.json").write_text(
         json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    print(f"[features] adult dirt rows={len(out):,} features={len(features)}", flush=True)
+    print(
+        f"[features] adult dirt rows={len(out):,} features={len(features)} "
+        f"memory_mb={out.memory_usage(deep=True).sum()/1e6:.1f}",
+        flush=True,
+    )
     return out
 
 
@@ -365,7 +423,7 @@ def clf_model(cfg, seed, n_estimators=180):
 
 
 def sorted_groups(sub):
-    s = sub.sort_values(["race_id", "馬番"]).copy()
+    s = sub.sort_values(["race_id", "horse_no"]).copy()
     return s, s.groupby("race_id", sort=False).size().tolist()
 
 
@@ -410,7 +468,7 @@ def wilson_lower(successes, n, z=1.6448536269514722):
 
 def feature_columns(df):
     excluded = {
-        "race_id", "year_full", "場所", "距離", "馬番", "馬名", "horse_id",
+        "race_id", "year_full", "place_code", "distance", "horse_no", "horse_id", "horse_id",
         "finish", "target_win", "target_top2", "target_top3",
         "rank_score", "rank_pos", "sp_target_win", "sp_target_top2", "sp_target_top3",
     }
@@ -635,12 +693,14 @@ def choose_scan(oof):
     return tab.iloc[0], tab, by_k
 
 
-def cell_name(place, distance):
+def cell_name(place_code, distance):
+    place = CODE_PLACE.get(int(place_code), "other")
     return f"{PLACE_SLUG.get(place, 'other')}_d{int(distance)}"
 
 
-def train_cell(cell_df, features, root: Path, place, distance):
-    name = cell_name(place, distance)
+def train_cell(cell_df, features, root: Path, place_code, distance):
+    place = CODE_PLACE.get(int(place_code), str(place_code))
+    name = cell_name(place_code, distance)
     out = root / "output" / "cells" / name
     out.mkdir(parents=True, exist_ok=True)
     model_dir = root / "models" / name
@@ -674,14 +734,14 @@ def train_cell(cell_df, features, root: Path, place, distance):
     oof_sp = attach_specialist_predictions(cell_df, features, selected_special, test=False)
     if oof_sp.empty:
         return {"cell": name, "venue": place, "distance": int(distance), "status": "SKIP_SPECIAL_OOF"}
-    rank_cols = oof_rank[["race_id", "馬番", "rank_score", "rank_pos"]]
-    oof = oof_sp.merge(rank_cols, on=["race_id", "馬番"], how="inner")
+    rank_cols = oof_rank[["race_id", "horse_no", "rank_score", "rank_pos"]]
+    oof = oof_sp.merge(rank_cols, on=["race_id", "horse_no"], how="inner")
 
     test_sp, special_models, special_med = attach_specialist_predictions(
         cell_df, features, selected_special, test=True
     )
     test = test_sp.merge(
-        te[["race_id", "馬番", "rank_score", "rank_pos"]], on=["race_id", "馬番"], how="inner"
+        te[["race_id", "horse_no", "rank_score", "rank_pos"]], on=["race_id", "horse_no"], how="inner"
     )
 
     scan_pick, scan_table, _ = choose_scan(oof)
@@ -808,30 +868,30 @@ def run_training(root: Path):
         adult = build_features(base, root)
         features = feature_columns(adult)
 
-        race_meta = adult.groupby(["場所", "距離", "year_full"], sort=False)["race_id"].nunique().reset_index(name="races")
+        race_meta = adult.groupby(["place_code", "distance", "year_full"], sort=False)["race_id"].nunique().reset_index(name="races")
         race_meta.to_csv(root / "output" / "CELL_YEAR_META.csv", index=False)
 
-        cells = adult.groupby(["場所", "距離"], sort=False)
+        cells = adult.groupby(["place_code", "distance"], sort=False)
         registry = []
         eligible = []
-        for (place, distance), g in cells:
+        for (place_code, distance), g in cells:
             train_races = g[g.year_full.between(2011, 2022)].race_id.nunique()
             test_races = g[g.year_full.between(2023, 2026)].race_id.nunique()
             if train_races >= 40 and test_races >= 10:
-                eligible.append((place, distance, train_races, test_races))
+                eligible.append((place_code, distance, train_races, test_races))
 
         write_status(root, phase="TRAINING_CELLS", eligible_cells=len(eligible), completed_cells=0)
-        for i, (place, distance, train_races, test_races) in enumerate(eligible, 1):
-            name = cell_name(place, distance)
+        for i, (place_code, distance, train_races, test_races) in enumerate(eligible, 1):
+            name = cell_name(place_code, distance)
             print(f"[cell] {i}/{len(eligible)} {name} train={train_races} test={test_races}", flush=True)
             try:
                 result = train_cell(
-                    adult[(adult["場所"] == place) & (adult["距離"] == distance)].copy(),
-                    features, root, place, distance
+                    adult[(adult["place_code"] == place_code) & (adult["distance"] == distance)].copy(),
+                    features, root, place_code, distance
                 )
             except Exception as exc:
                 result = {
-                    "cell": name, "venue": place, "distance": int(distance),
+                    "cell": name, "venue": CODE_PLACE.get(int(place_code), str(place_code)), "distance": int(distance),
                     "status": "ERROR", "error": repr(exc),
                 }
                 print(f"[cell:error] {name}: {exc!r}", flush=True)
