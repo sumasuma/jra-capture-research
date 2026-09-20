@@ -325,17 +325,24 @@ def build_features(base: pd.DataFrame, root: Path):
         ["horse_id", "place_code", "surface_code", "distance", "class_level"], "x"
     )
 
-    prev_days = base.groupby("horse_id", sort=False)["date_days"].shift(1)
+    horse_group = base.groupby("horse_id", sort=False)
+    prev_days = horse_group["date_days"].shift(1)
+    prev_body = horse_group["bodyweight"].shift(1)
+    prev_carried = horse_group["carried"].shift(1)
     adult["days_since"] = (
         base.loc[mask, "date_days"].to_numpy(dtype="float32")
         - prev_days.loc[mask].to_numpy(dtype="float32")
     )
     adult["body_change"] = (
-        adult["bodyweight"].astype("float32") - adult["g_last_bodyweight"].astype("float32")
+        adult["bodyweight"].to_numpy(dtype="float32")
+        - prev_body.loc[mask].to_numpy(dtype="float32")
     )
     adult["carry_change"] = (
-        adult["carried"].astype("float32") - adult["g_last_carried"].astype("float32")
+        adult["carried"].to_numpy(dtype="float32")
+        - prev_carried.loc[mask].to_numpy(dtype="float32")
     )
+    del horse_group, prev_days, prev_body, prev_carried
+    gc.collect()
 
     for pref in ["g", "b", "e", "x"]:
         adult[f"race_{pref}_cov"] = adult.groupby("race_id", sort=False)[f"{pref}_n"].transform(
