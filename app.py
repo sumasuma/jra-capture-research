@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import shutil
+import urllib.request
 import zipfile
 from pathlib import Path
 
@@ -16,6 +17,7 @@ INPUT.mkdir(parents=True, exist_ok=True)
 OUTPUT.mkdir(parents=True, exist_ok=True)
 
 TOKEN = os.environ.get("UPLOAD_TOKEN", "")
+DATA_URL = os.environ.get("DATA_URL", "")
 
 app = FastAPI(title="JRA Capture Research Worker")
 
@@ -25,9 +27,30 @@ def auth(x_upload_token: str | None):
         raise HTTPException(status_code=401, detail="invalid token")
 
 
+def bootstrap_data():
+    if not DATA_URL:
+        return
+    target = INPUT / "central.zip"
+    if target.exists() and target.stat().st_size > 0:
+        return
+    tmp = INPUT / "central.zip.part"
+    urllib.request.urlretrieve(DATA_URL, tmp)
+    tmp.replace(target)
+
+
+@app.on_event("startup")
+def startup():
+    bootstrap_data()
+
+
 @app.get("/health")
 def health():
-    return {"ok": True, "workdir": str(ROOT)}
+    files = [
+        {"name": p.name, "bytes": p.stat().st_size}
+        for p in sorted(INPUT.glob("*"))
+        if p.is_file()
+    ]
+    return {"ok": True, "workdir": str(ROOT), "input_files": files}
 
 
 @app.post("/upload")
@@ -47,6 +70,14 @@ async def upload(file: UploadFile = File(...), x_upload_token: str | None = Head
     return {"ok": True, "path": str(target), "bytes": size, "sha256": h.hexdigest()}
 
 
+def inspect_zip(path: Path):
+    out = {"zip": path.name, "bytes": path.stat().st_size, "members": []}
+    with zipfile.ZipFile(path) as z:
+        for info in z.infolist()[:200]:
+            out["members"].append({"name": info.filename, "bytes": info.file_size})
+    return out
+
+
 @app.post("/inspect")
 def inspect_dataset(x_upload_token: str | None = Header(default=None)):
     auth(x_upload_token)
@@ -55,28 +86,18 @@ def inspect_dataset(x_upload_token: str | None = Header(default=None)):
         raise HTTPException(status_code=404, detail="no zip uploaded")
     zp = zips[-1]
 
-    rows = []
-    csv_names = []
+    result = inspect_zip(zp)
+    nested = []
     with zipfile.ZipFile(zp) as z:
-        names = [n for n in z.namelist() if n.lower().endswith(".csv")]
-        csv_names = names
-        for name in names[:80]:
-            try:
-                with z.open(name) as fh:
-                    df = pd.read_csv(fh, encoding="cp932", nrows=5)
-                rows.append({
-                    "name": name,
-                    "ncols": int(df.shape[1]),
-                    "columns": [str(c) for c in df.columns[:40]],
-                })
-            except Exception as e:
-                rows.append({"name": name, "error": repr(e)})
+        for name in z.namelist():
+            if name.lower().endswith(".zip"):
+                target = INPUT / Path(name).name
+                if not target.exists():
+                    with z.open(name) as src, target.open("wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                nested.append(inspect_zip(target))
+    result["nested_zips"] = nested
 
-    result = {
-        "zip": zp.name,
-        "csv_count": len(csv_names),
-        "sample_files": rows,
-    }
     out = OUTPUT / "dataset_inspection.json"
     out.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return result
