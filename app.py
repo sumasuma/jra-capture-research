@@ -20,6 +20,7 @@ TOKEN = os.environ.get("UPLOAD_TOKEN", "")
 DATA_URL = os.environ.get("DATA_URL", "")
 
 app = FastAPI(title="JRA Capture Research Worker")
+BOOTSTRAP_ERROR = None
 
 
 def auth(x_upload_token: str | None):
@@ -28,14 +29,23 @@ def auth(x_upload_token: str | None):
 
 
 def bootstrap_data():
+    global BOOTSTRAP_ERROR
+    BOOTSTRAP_ERROR = None
     if not DATA_URL:
         return
     target = INPUT / "central.zip"
     if target.exists() and target.stat().st_size > 0:
         return
     tmp = INPUT / "central.zip.part"
-    urllib.request.urlretrieve(DATA_URL, tmp)
-    tmp.replace(target)
+    try:
+        urllib.request.urlretrieve(DATA_URL, tmp)
+        tmp.replace(target)
+    except Exception as exc:
+        BOOTSTRAP_ERROR = repr(exc)
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 @app.on_event("startup")
@@ -50,7 +60,7 @@ def health():
         for p in sorted(INPUT.glob("*"))
         if p.is_file()
     ]
-    return {"ok": True, "workdir": str(ROOT), "input_files": files}
+    return {"ok": True, "workdir": str(ROOT), "input_files": files, "bootstrap_error": BOOTSTRAP_ERROR}
 
 
 @app.post("/upload")
