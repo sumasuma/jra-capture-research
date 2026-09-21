@@ -83,8 +83,9 @@ def maybe_start_training():
     if status.exists():
         try:
             s = json.loads(status.read_text(encoding="utf-8"))
-            if s.get("complete"):
-                print("[train] already complete; not restarting", flush=True)
+            version = (s.get("summary") or {}).get("version")
+            if s.get("complete") and version == "JRA_ADULT_DIRT_RUNTIME_V2_2":
+                print("[train] v2.2 already complete; not restarting", flush=True)
                 return
         except Exception:
             pass
