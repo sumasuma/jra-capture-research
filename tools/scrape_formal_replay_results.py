@@ -64,7 +64,10 @@ def scrape_one(race_id12, date, venue):
     if table is None:
         return {"audit":{"race_id12":race_id12,"url":url,"status":"NO_TABLE","title":title,"meta":meta},"rows":[]}
     rows=[]
-    for tr in table.select("tr.HorseList"):
+    result_rows=table.select("tr.HorseList")
+    if not result_rows:
+        result_rows=[tr for tr in table.find_all("tr") if tr.select_one('a[href*="/horse/"]')]
+    for tr in result_rows:
         # netkeiba occasionally changes/omits td class names. Keep the
         # semantic-class path, with a stable positional fallback.
         tds=tr.find_all("td", recursive=False)
