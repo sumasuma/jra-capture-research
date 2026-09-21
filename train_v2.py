@@ -5,6 +5,7 @@ import math
 import os
 import shutil
 import time
+import traceback
 import warnings
 import zipfile
 from pathlib import Path
@@ -901,6 +902,7 @@ def run_training(root: Path):
                     features, root, place_code, distance
                 )
             except Exception as exc:
+                traceback.print_exc()
                 result = {
                     "cell": name, "venue": CODE_PLACE.get(int(place_code), str(place_code)), "distance": int(distance),
                     "status": "ERROR", "error": repr(exc),
