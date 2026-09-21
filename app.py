@@ -136,7 +136,7 @@ def summary():
 
 @app.get("/download/runtime")
 def download_runtime():
-    p = OUTPUT / "JRA_ADULT_DIRT_RUNTIME_V2.zip"
+    p = OUTPUT / "JRA_ADULT_DIRT_RUNTIME_V2_2.zip"
     if not p.exists():
         raise HTTPException(status_code=404, detail="runtime not ready")
     return FileResponse(p, media_type="application/zip", filename=p.name)
