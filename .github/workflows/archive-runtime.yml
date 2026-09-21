@@ -1,0 +1,43 @@
+name: Archive JRA adult dirt runtime
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/archive-runtime.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download runtime
+        run: |
+          curl --fail --location --retry 5 \
+            "https://adult-dirt-worker-v2-production.up.railway.app/download/runtime" \
+            --output JRA_ADULT_DIRT_RUNTIME_V2_3.zip
+
+      - name: Verify SHA256
+        run: |
+          echo "dbbcaec051215c6aa284c345bae0832b07da5683b85d6b28f85adace55e1f455  JRA_ADULT_DIRT_RUNTIME_V2_3.zip" | sha256sum --check
+          test "$(stat -c%s JRA_ADULT_DIRT_RUNTIME_V2_3.zip)" = "15370870"
+
+      - name: Fetch audit metadata
+        run: |
+          curl --fail --location "https://adult-dirt-worker-v2-production.up.railway.app/registry" --output REGISTRY.csv
+          curl --fail --location "https://adult-dirt-worker-v2-production.up.railway.app/summary" --output SUMMARY.json
+
+      - name: Upload verified artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JRA_ADULT_DIRT_RUNTIME_V2_3
+          path: |
+            JRA_ADULT_DIRT_RUNTIME_V2_3.zip
+            REGISTRY.csv
+            SUMMARY.json
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
