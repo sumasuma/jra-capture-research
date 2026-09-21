@@ -1,0 +1,36 @@
+name: Build pinned cp313 wheelhouse
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-cp313-wheelhouse.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wheelhouse:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Download pinned runtime wheels
+        run: |
+          python -m pip install --upgrade pip
+          mkdir -p wheelhouse
+          python -m pip download --only-binary=:all: --dest wheelhouse             pandas==2.3.2             numpy==2.3.2             scikit-learn==1.7.1             joblib==1.5.2             lightgbm==4.6.0
+      - name: Record hashes
+        run: |
+          python -m pip --version > wheelhouse/BUILD_INFO.txt
+          python --version >> wheelhouse/BUILD_INFO.txt
+          sha256sum wheelhouse/*.whl > wheelhouse/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jra-pinned-cp313-wheelhouse
+          path: wheelhouse
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
