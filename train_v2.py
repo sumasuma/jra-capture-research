@@ -223,11 +223,9 @@ def load_history(zip_path: Path, root: Path):
             # レースID(新) is runner-level: the trailing 2 digits are 馬番.
             # Strip them to obtain one stable key shared by every runner in a race.
             race_key_text = runner_id_text.str[:-2]
-            race_hash = (
-                pd.util.hash_pandas_object(race_key_text, index=False).to_numpy(dtype="uint64")
-                & np.uint64(0x7FFFFFFFFFFFFFFF)
-            ).astype("int64")
-            n["race_id"] = race_hash
+            if not bool(race_key_text.str.fullmatch(r"\d{16}").all()):
+                raise RuntimeError("race key format mismatch: expected 16 numeric digits")
+            n["race_id"] = pd.to_numeric(race_key_text, errors="raise").astype("int64")
 
             horse = num("血統登録番号")
             fb = (
