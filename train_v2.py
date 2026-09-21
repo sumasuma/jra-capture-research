@@ -106,7 +106,7 @@ def dist_band(x):
 
 
 def load_history(zip_path: Path, root: Path):
-    cache = root / "cache" / "history_base_allrunners_v2_1.pkl"
+    cache = root / "cache" / "history_base_allrunners_v2_2.pkl"
     cache.parent.mkdir(parents=True, exist_ok=True)
     if cache.exists():
         print(f"[load] using compact cache {cache}", flush=True)
@@ -167,9 +167,12 @@ def load_history(zip_path: Path, root: Path):
                 except Exception:
                     continue
 
-            # Keep the full current race field. Do NOT filter current runners using
-            # the eventual finishing result; that would leak post-race information.
-            valid_race = d["レースID(新)"].notna()
+            # Pre-race-safe field definition:
+            # 1=出走取消, 2=発走除外, 3=競走除外 never started and are known
+            # before the race starts, so remove them. Keep 4+ (競走中止/失格/etc.)
+            # because those horses did start and belong in the pre-race field.
+            abnormal = pd.to_numeric(d["異常コード"], errors="coerce").fillna(0).astype("int8")
+            valid_race = d["レースID(新)"].notna() & ~abnormal.isin([1, 2, 3])
             d = d.loc[valid_race].copy()
             if d.empty:
                 continue
@@ -207,12 +210,21 @@ def load_history(zip_path: Path, root: Path):
             n["track_state_code"] = d["馬場状態"].map(TRACK_STATE_MAP).fillna(0).astype("int8")
             n["sex_code"] = d["性別"].map(SEX_MAP).fillna(0).astype("int8")
 
-            race_text = (
+            runner_id_text = (
                 d["レースID(新)"].astype("string").fillna("").str.strip()
                 .str.replace(r"\.0$", "", regex=True)
             )
+            horse_no_text = pd.to_numeric(d["馬番"], errors="coerce").fillna(0).astype("int16").astype(str).str.zfill(2)
+            suffix_ok = runner_id_text.str[-2:].eq(horse_no_text)
+            if not bool(suffix_ok.all()):
+                bad_n = int((~suffix_ok).sum())
+                raise RuntimeError(f"race id suffix/horse number mismatch rows={bad_n}")
+
+            # レースID(新) is runner-level: the trailing 2 digits are 馬番.
+            # Strip them to obtain one stable key shared by every runner in a race.
+            race_key_text = runner_id_text.str[:-2]
             race_hash = (
-                pd.util.hash_pandas_object(race_text, index=False).to_numpy(dtype="uint64")
+                pd.util.hash_pandas_object(race_key_text, index=False).to_numpy(dtype="uint64")
                 & np.uint64(0x7FFFFFFFFFFFFFFF)
             ).astype("int64")
             n["race_id"] = race_hash
@@ -309,7 +321,7 @@ def add_group_features_to_target(base, adult, mask, keys, prefix, add_last3=Fals
     return adult
 
 def build_features(base: pd.DataFrame, root: Path):
-    cache = root / "cache" / "adult_dirt_features_simple97_noleak_v2_1.pkl"
+    cache = root / "cache" / "adult_dirt_features_simple97_noleak_v2_2.pkl"
     if cache.exists():
         print(f"[features] using cache {cache}", flush=True)
         return pd.read_pickle(cache)
@@ -399,10 +411,12 @@ def build_features(base: pd.DataFrame, root: Path):
     out.to_pickle(cache)
 
     spec = {
-        "version": "ADULT_DIRT_V2_1_NOLEAK",
+        "version": "ADULT_DIRT_V2_2_NOLEAK",
         "history_rows_completed_only": True,
         "current_race_keeps_all_runners": True,
         "postrace_finish_filter_on_current_race": False,
+        "prestart_nonrunners_excluded_abnormal_codes": [1, 2, 3],
+        "race_key_source": "レースID(新) stripped trailing 2-digit horse number",
         "odds_popularity_used": False,
         "compact_numeric_loader": True,
         "feature_family": "simple97_memory_safe",
@@ -884,7 +898,7 @@ def build_manifest(root: Path):
 
 
 def make_runtime_zip(root: Path):
-    target = root / "output" / "JRA_ADULT_DIRT_RUNTIME_V2_1.zip"
+    target = root / "output" / "JRA_ADULT_DIRT_RUNTIME_V2_2.zip"
     if target.exists():
         target.unlink()
     with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as z:
@@ -913,6 +927,18 @@ def run_training(root: Path):
         write_status(root, phase="BUILDING_FEATURES", completed_rows=int(len(base)))
         adult = build_features(base, root)
         features = feature_columns(adult)
+
+        race_sizes = adult.groupby("race_id", sort=False).size()
+        if len(race_sizes) == 0:
+            raise RuntimeError("no adult dirt races after feature build")
+        if int(race_sizes.min()) < 3:
+            bad = int((race_sizes < 3).sum())
+            raise RuntimeError(f"race grouping integrity failure: short_races={bad} min_runners={int(race_sizes.min())}")
+        print(
+            f"[audit] race_groups={len(race_sizes):,} min_runners={int(race_sizes.min())} "
+            f"max_runners={int(race_sizes.max())}",
+            flush=True,
+        )
 
         race_meta = adult.groupby(["place_code", "distance", "year_full"], sort=False)["race_id"].nunique().reset_index(name="races")
         race_meta.to_csv(root / "output" / "CELL_YEAR_META.csv", index=False)
@@ -955,7 +981,7 @@ def run_training(root: Path):
         runtime_zip = make_runtime_zip(root)
         runtime_sha = sha256_file(runtime_zip)
         summary = {
-            "version": "JRA_ADULT_DIRT_RUNTIME_V2_1",
+            "version": "JRA_ADULT_DIRT_RUNTIME_V2_2",
             "eligible_cells": len(eligible),
             "adopt_cells": int((reg.get("status") == "ADOPT").sum()) if not reg.empty else 0,
             "skip_cells": int((reg.get("status") == "SKIP").sum()) if not reg.empty else 0,
