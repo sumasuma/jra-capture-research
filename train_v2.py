@@ -106,7 +106,7 @@ def dist_band(x):
 
 
 def load_history(zip_path: Path, root: Path):
-    cache = root / "cache" / "history_base_allrunners_v2_2.pkl"
+    cache = root / "cache" / "history_base_flat_allrunners_v2_3.pkl"
     cache.parent.mkdir(parents=True, exist_ok=True)
     if cache.exists():
         print(f"[load] using compact cache {cache}", flush=True)
@@ -172,7 +172,12 @@ def load_history(zip_path: Path, root: Path):
             # before the race starts, so remove them. Keep 4+ (競走中止/失格/etc.)
             # because those horses did start and belong in the pre-race field.
             abnormal = pd.to_numeric(d["異常コード"], errors="coerce").fillna(0).astype("int8")
-            valid_race = d["レースID(新)"].notna() & ~abnormal.isin([1, 2, 3])
+            track_code_raw = pd.to_numeric(d["トラックコード"], errors="coerce")
+            # JRA source audit: track_code 2/3 are obstacle races (2=turf obstacle,
+            # 3=dirt obstacle). Exclude them BEFORE building any horse history so
+            # g/b/e/x are flat-racing histories only.
+            flat_row = ~track_code_raw.isin([2, 3])
+            valid_race = d["レースID(新)"].notna() & flat_row & ~abnormal.isin([1, 2, 3])
             d = d.loc[valid_race].copy()
             if d.empty:
                 continue
@@ -319,7 +324,7 @@ def add_group_features_to_target(base, adult, mask, keys, prefix, add_last3=Fals
     return adult
 
 def build_features(base: pd.DataFrame, root: Path):
-    cache = root / "cache" / "adult_dirt_features_simple97_noleak_v2_2.pkl"
+    cache = root / "cache" / "adult_dirt_features_simple97_flat_noleak_v2_3.pkl"
     if cache.exists():
         try:
             print(f"[features] using cache {cache}", flush=True)
@@ -416,11 +421,12 @@ def build_features(base: pd.DataFrame, root: Path):
     os.replace(cache_tmp, cache)
 
     spec = {
-        "version": "ADULT_DIRT_V2_2_NOLEAK",
+        "version": "ADULT_DIRT_V2_3_FLAT_NOLEAK",
         "history_rows_completed_only": True,
         "current_race_keeps_all_runners": True,
         "postrace_finish_filter_on_current_race": False,
         "prestart_nonrunners_excluded_abnormal_codes": [1, 2, 3],
+        "obstacle_track_codes_excluded_before_history": [2, 3],
         "race_key_source": "レースID(新) stripped trailing 2-digit horse number",
         "odds_popularity_used": False,
         "compact_numeric_loader": True,
@@ -911,7 +917,7 @@ def build_manifest(root: Path):
 
 
 def make_runtime_zip(root: Path):
-    target = root / "output" / "JRA_ADULT_DIRT_RUNTIME_V2_2.zip"
+    target = root / "output" / "JRA_ADULT_DIRT_RUNTIME_V2_3.zip"
     if target.exists():
         target.unlink()
     with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as z:
@@ -926,8 +932,8 @@ def make_runtime_zip(root: Path):
     return target
 
 
-def prepare_v2_2_workspace(root: Path):
-    expected = "JRA_ADULT_DIRT_RUNTIME_V2_2"
+def prepare_v2_3_workspace(root: Path):
+    expected = "JRA_ADULT_DIRT_RUNTIME_V2_3"
     status_path = root / "output" / "status.json"
     existing_version = None
     if status_path.exists():
@@ -937,16 +943,16 @@ def prepare_v2_2_workspace(root: Path):
         except Exception:
             existing_version = None
 
-    # If this volume still contains the invalid pre-v2.2 artifacts, isolate them
+    # If this volume still contains the invalid pre-v2.3 artifacts, isolate them
     # automatically. Input data and cache are intentionally preserved.
     if existing_version != expected:
-        archive = root / "archive_invalid_v2"
+        archive = root / "archive_invalid_pre_v2_3"
         archive.mkdir(parents=True, exist_ok=True)
         for name in ["models", "output"]:
             src = root / name
             if not src.exists():
                 continue
-            dst = archive / f"{name}_pre_v2_2"
+            dst = archive / f"{name}_pre_v2_3"
             if dst.exists():
                 shutil.rmtree(dst)
             shutil.move(str(src), str(dst))
@@ -955,17 +961,20 @@ def prepare_v2_2_workspace(root: Path):
     (root / "models").mkdir(parents=True, exist_ok=True)
 
     # Reclaim the small Railway volume from caches that can no longer be used by
-    # v2.2. The raw input ZIP and the authoritative v2.2 all-runner cache remain.
+    # v2.3. The raw input ZIP and the authoritative v2.3 all-runner cache remain.
     obsolete = [
         root / "cache" / "history_base_compact.pkl",
         root / "cache" / "adult_dirt_features_simple97_v2.pkl",
+        root / "cache" / "history_base_allrunners_v2_2.pkl",
+        root / "cache" / "adult_dirt_features_simple97_noleak_v2_2.pkl",
+        root / "cache" / "adult_dirt_features_simple97_noleak_v2_2.pkl.part",
     ]
     for p in obsolete:
         if p.exists():
             print(f"[cleanup] removing obsolete cache {p.name} bytes={p.stat().st_size}", flush=True)
             p.unlink()
 
-    target_cache = root / "cache" / "adult_dirt_features_simple97_noleak_v2_2.pkl"
+    target_cache = root / "cache" / "adult_dirt_features_simple97_flat_noleak_v2_3.pkl"
     target_part = target_cache.with_suffix(target_cache.suffix + ".part")
     # A cache file from a previously failed ENOSPC write is not authoritative.
     if target_part.exists():
@@ -974,7 +983,7 @@ def prepare_v2_2_workspace(root: Path):
 
 def run_training(root: Path):
     root = Path(root)
-    prepare_v2_2_workspace(root)
+    prepare_v2_3_workspace(root)
     write_status(root, phase="STARTING", complete=False, error=None)
     try:
         zip_path = root / "input" / "central.zip"
@@ -1039,7 +1048,7 @@ def run_training(root: Path):
         runtime_zip = make_runtime_zip(root)
         runtime_sha = sha256_file(runtime_zip)
         summary = {
-            "version": "JRA_ADULT_DIRT_RUNTIME_V2_2",
+            "version": "JRA_ADULT_DIRT_RUNTIME_V2_3",
             "eligible_cells": len(eligible),
             "adopt_cells": int((reg.get("status") == "ADOPT").sum()) if not reg.empty else 0,
             "skip_cells": int((reg.get("status") == "SKIP").sum()) if not reg.empty else 0,
