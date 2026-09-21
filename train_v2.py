@@ -815,10 +815,17 @@ def train_cell(cell_df, features, root: Path, place_code, distance):
         if c not in {"race_id", "year", "full3", "axis_hit", "formation"}
         and pd.api.types.is_numeric_dtype(ro[c])
     ]
-    scan_med = ro[sf].median()
-    scan_cfg = SCAN_CFGS[int(scan_pick["cfg_idx"])]
-    scan_model = clf_model(scan_cfg, 6000, 280)
-    scan_model.fit(ro[sf].fillna(scan_med), ro.formation)
+    # Preserve forward calibration: the threshold was selected from a model
+    # trained on 2017-2020 and evaluated on 2021-2022. Recreate that exact
+    # training regime for the frozen 2023-2026 test instead of refitting on
+    # 2021-2022 and reusing an incompatible probability threshold.
+    scan_train = ro[ro.year.between(2017, 2020)].copy()
+    scan_med = scan_train[sf].median()
+    scan_cfg_idx = int(scan_pick["cfg_idx"])
+    scan_cfg = SCAN_CFGS[scan_cfg_idx]
+    scan_seed = 5000 + k * 10 + scan_cfg_idx
+    scan_model = clf_model(scan_cfg, scan_seed, 180)
+    scan_model.fit(scan_train[sf].fillna(scan_med), scan_train.formation)
     rt["scan_prob"] = scan_model.predict_proba(rt[sf].fillna(scan_med))[:, 1]
     rt["play"] = rt["scan_prob"] >= float(scan_pick["thr"])
     played = rt[rt.play].copy()
@@ -863,6 +870,7 @@ def train_cell(cell_df, features, root: Path, place_code, distance):
         "features": features, "rank_cfg": rank_cfg,
         "special_cfg": {k_: list(v) for k_, v in selected_special.items()},
         "scan_cfg": list(scan_cfg), "scan_features": sf,
+        "scan_train_years": [2017, 2020], "scan_threshold_validation_years": [2021, 2022],
         "scan_threshold": float(scan_pick["thr"]), "candidate_k": k,
         "marks": ["target_win", "target_top2", "target_top3"],
         "odds_popularity_used": False,
