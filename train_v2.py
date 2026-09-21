@@ -321,8 +321,12 @@ def add_group_features_to_target(base, adult, mask, keys, prefix, add_last3=Fals
 def build_features(base: pd.DataFrame, root: Path):
     cache = root / "cache" / "adult_dirt_features_simple97_noleak_v2_2.pkl"
     if cache.exists():
-        print(f"[features] using cache {cache}", flush=True)
-        return pd.read_pickle(cache)
+        try:
+            print(f"[features] using cache {cache}", flush=True)
+            return pd.read_pickle(cache)
+        except Exception as exc:
+            print(f"[features] invalid cache removed: {cache.name} {exc!r}", flush=True)
+            cache.unlink(missing_ok=True)
 
     mask = (
         (base["surface_code"] == 2)
@@ -406,7 +410,10 @@ def build_features(base: pd.DataFrame, root: Path):
         raise RuntimeError("duplicate feature columns detected")
     for col in features:
         out[col] = pd.to_numeric(out[col], errors="coerce").astype("float32")
-    out.to_pickle(cache)
+    cache_tmp = cache.with_suffix(cache.suffix + ".part")
+    cache_tmp.unlink(missing_ok=True)
+    out.to_pickle(cache_tmp)
+    os.replace(cache_tmp, cache)
 
     spec = {
         "version": "ADULT_DIRT_V2_2_NOLEAK",
@@ -946,6 +953,23 @@ def prepare_v2_2_workspace(root: Path):
 
     (root / "output").mkdir(parents=True, exist_ok=True)
     (root / "models").mkdir(parents=True, exist_ok=True)
+
+    # Reclaim the small Railway volume from caches that can no longer be used by
+    # v2.2. The raw input ZIP and the authoritative v2.2 all-runner cache remain.
+    obsolete = [
+        root / "cache" / "history_base_compact.pkl",
+        root / "cache" / "adult_dirt_features_simple97_v2.pkl",
+    ]
+    for p in obsolete:
+        if p.exists():
+            print(f"[cleanup] removing obsolete cache {p.name} bytes={p.stat().st_size}", flush=True)
+            p.unlink()
+
+    target_cache = root / "cache" / "adult_dirt_features_simple97_noleak_v2_2.pkl"
+    target_part = target_cache.with_suffix(target_cache.suffix + ".part")
+    # A cache file from a previously failed ENOSPC write is not authoritative.
+    if target_part.exists():
+        target_part.unlink()
 
 
 def run_training(root: Path):
