@@ -65,31 +65,43 @@ def scrape_one(race_id12, date, venue):
         return {"audit":{"race_id12":race_id12,"url":url,"status":"NO_TABLE","title":title,"meta":meta},"rows":[]}
     rows=[]
     for tr in table.select("tr.HorseList"):
-        rank=cell_text(tr,"Rank")
+        # netkeiba occasionally changes/omits td class names. Keep the
+        # semantic-class path, with a stable positional fallback.
+        tds=tr.find_all("td", recursive=False)
+        def pos(i):
+            return tds[i].get_text(" ",strip=True) if 0 <= i < len(tds) else ""
+
+        rank=cell_text(tr,"Rank") or pos(0)
+        rank=str(rank).strip()
         if not rank.isdigit(): continue
         finish=int(rank)
+
         no=cell_text(tr,"Num.Txt_C") or cell_text(tr,"Num")
         if not str(no).strip().isdigit():
-            # fallback: horse-number cell is usually the second Num cell
-            nums=[x.get_text(" ",strip=True) for x in tr.select("td.Num")]
-            no=nums[-1] if nums else ""
+            no=pos(2)
         if not str(no).strip().isdigit(): continue
         horse_no=int(str(no).strip())
+
         hi=tr.select_one("td.Horse_Info")
+        if hi is None and len(tds) > 3:
+            hi=tds[3]
         ha=hi.select_one('a[href*="/horse/"]') if hi else None
         if ha is None: continue
         horse_name=ha.get_text(" ",strip=True)
-        hm=re.search(r"/horse/(\d+)",ha.get("href",""))
+        hm=re.search(r"/horse/(\\d+)",ha.get("href",""))
         if not hm: continue
         horse_id=hm.group(1)
-        barei=cell_text(tr,"Barei")
-        am=re.search(r"(\d+)",barei)
+
+        barei=cell_text(tr,"Barei") or pos(4)
+        am=re.search(r"(\\d+)",barei)
         age=int(am.group(1)) if am else None
-        wt=cell_text(tr,"Weight")
-        wtm=re.search(r"(\d+(?:\.\d+)?)",wt)
+
+        wt=cell_text(tr,"Weight") or pos(5)
+        wtm=re.search(r"(\\d+(?:\\.\\d+)?)",wt)
         carried=float(wtm.group(1)) if wtm else None
-        jk=cell_text(tr,"Jockey")
-        tm=cell_text(tr,"Time")
+
+        jk=cell_text(tr,"Jockey") or pos(6)
+        tm=cell_text(tr,"Time") or pos(7)
         actual=sec(tm)
         if actual is None: continue
         rows.append({
