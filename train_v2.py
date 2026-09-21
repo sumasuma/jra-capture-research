@@ -106,7 +106,7 @@ def dist_band(x):
 
 
 def load_history(zip_path: Path, root: Path):
-    cache = root / "cache" / "history_base_compact.pkl"
+    cache = root / "cache" / "history_base_allrunners_v2_1.pkl"
     cache.parent.mkdir(parents=True, exist_ok=True)
     if cache.exists():
         print(f"[load] using compact cache {cache}", flush=True)
@@ -167,8 +167,10 @@ def load_history(zip_path: Path, root: Path):
                 except Exception:
                     continue
 
-            finish = pd.to_numeric(d["確定着順"], errors="coerce")
-            d = d.loc[finish > 0].copy()
+            # Keep the full current race field. Do NOT filter current runners using
+            # the eventual finishing result; that would leak post-race information.
+            valid_race = d["レースID(新)"].notna()
+            d = d.loc[valid_race].copy()
             if d.empty:
                 continue
 
@@ -205,8 +207,15 @@ def load_history(zip_path: Path, root: Path):
             n["track_state_code"] = d["馬場状態"].map(TRACK_STATE_MAP).fillna(0).astype("int8")
             n["sex_code"] = d["性別"].map(SEX_MAP).fillna(0).astype("int8")
 
-            race = num("レースID(新)")
-            n["race_id"] = race.fillna(0).astype("int64")
+            race_text = (
+                d["レースID(新)"].astype("string").fillna("").str.strip()
+                .str.replace(r"\.0$", "", regex=True)
+            )
+            race_hash = (
+                pd.util.hash_pandas_object(race_text, index=False).to_numpy(dtype="uint64")
+                & np.uint64(0x7FFFFFFFFFFFFFFF)
+            ).astype("int64")
+            n["race_id"] = race_hash
 
             horse = num("血統登録番号")
             fb = (
@@ -232,6 +241,7 @@ def load_history(zip_path: Path, root: Path):
             n["speed1000"] = (
                 n["time_sec"] / n["distance"].replace(0, np.nan).astype("float32") * 1000.0
             ).astype("float32")
+            n["completed"] = (n["finish"] > 0).astype("int8")
             n["target_win"] = (n["finish"] == 1).astype("int8")
             n["target_top2"] = n["finish"].between(1, 2).astype("int8")
             n["target_top3"] = n["finish"].between(1, 3).astype("int8")
@@ -251,7 +261,7 @@ def load_history(zip_path: Path, root: Path):
     df.reset_index(drop=True, inplace=True)
     df.to_pickle(cache)
     print(
-        f"[load] compact completed rows={len(df):,} memory_mb={df.memory_usage(deep=True).sum()/1e6:.1f}",
+        f"[load] all-runner compact rows={len(df):,} memory_mb={df.memory_usage(deep=True).sum()/1e6:.1f}",
         flush=True,
     )
     return df
@@ -259,34 +269,47 @@ def load_history(zip_path: Path, root: Path):
 
 def add_group_features_to_target(base, adult, mask, keys, prefix, add_last3=False):
     key_series = [base[k] for k in keys]
-    gb = base.groupby(keys, sort=False, observed=True, dropna=False)
-    adult[f"{prefix}_n"] = gb.cumcount().loc[mask].to_numpy(dtype="int32")
+    completed = base["completed"].astype("int32")
+
+    # History count = only prior completed races in the matching context.
+    comp_cum = completed.groupby(key_series, sort=False, dropna=False).cumsum() - completed
+    adult[f"{prefix}_n"] = comp_cum.loc[mask].to_numpy(dtype="int32")
+    del comp_cum
 
     for m in HIST_METRICS:
-        shifted = gb[m].shift(1)
-        adult[f"{prefix}_last_{m}"] = shifted.loc[mask].to_numpy(dtype="float32")
+        # Prior result metrics are known at prediction time. Current/future
+        # non-completions never enter the historical aggregate.
+        masked = base[m].where(base["completed"].eq(1))
 
-        valid = base[m].notna().astype("int32")
-        filled = base[m].fillna(0.0).astype("float64")
+        shifted = masked.groupby(key_series, sort=False, dropna=False).shift(1)
+        last = shifted.groupby(key_series, sort=False, dropna=False).ffill()
+        adult[f"{prefix}_last_{m}"] = last.loc[mask].to_numpy(dtype="float32")
+
+        valid = masked.notna().astype("int32")
+        filled = masked.fillna(0.0).astype("float64")
         csum = filled.groupby(key_series, sort=False, dropna=False).cumsum() - filled
         ccnt = valid.groupby(key_series, sort=False, dropna=False).cumsum() - valid
         mean = csum / ccnt.replace(0, np.nan)
         adult[f"{prefix}_mean_{m}"] = mean.loc[mask].to_numpy(dtype="float32")
 
         if add_last3 and m in LAST3_METRICS:
-            last3 = gb[m].transform(lambda s: s.shift(1).rolling(3, min_periods=1).mean())
+            # Rolling over the previous three race rows, averaging only completed
+            # values. This is pre-race safe because all inputs are prior rows.
+            last3 = masked.groupby(key_series, sort=False, dropna=False).transform(
+                lambda s: s.shift(1).rolling(3, min_periods=1).mean()
+            )
             adult[f"{prefix}_last3_{m}"] = last3.loc[mask].to_numpy(dtype="float32")
             del last3
 
-        del shifted, valid, filled, csum, ccnt, mean
+        del masked, shifted, last, valid, filled, csum, ccnt, mean
         gc.collect()
-    del gb
+
+    del completed
     gc.collect()
     return adult
 
-
 def build_features(base: pd.DataFrame, root: Path):
-    cache = root / "cache" / "adult_dirt_features_simple97_v2.pkl"
+    cache = root / "cache" / "adult_dirt_features_simple97_noleak_v2_1.pkl"
     if cache.exists():
         print(f"[features] using cache {cache}", flush=True)
         return pd.read_pickle(cache)
@@ -376,8 +399,10 @@ def build_features(base: pd.DataFrame, root: Path):
     out.to_pickle(cache)
 
     spec = {
-        "version": "ADULT_DIRT_V2",
+        "version": "ADULT_DIRT_V2_1_NOLEAK",
         "history_rows_completed_only": True,
+        "current_race_keeps_all_runners": True,
+        "postrace_finish_filter_on_current_race": False,
         "odds_popularity_used": False,
         "compact_numeric_loader": True,
         "feature_family": "simple97_memory_safe",
@@ -608,8 +633,14 @@ def attach_specialist_predictions(df, features, selected, test=False):
 def mark_and_race_features(horses, k):
     rows = []
     marked_parts = []
+    short_races = 0
     for rid, g in horses.groupby("race_id", sort=False):
         gg = g.copy()
+        if len(gg) < 3:
+            # A 3-of-3 objective is undefined for fewer than three available rows.
+            # Keep this fail-closed and visible rather than crashing.
+            short_races += 1
+            continue
         chosen = []
         for score in ["sp_target_win", "sp_target_top2", "sp_target_top3"]:
             cand = gg.loc[~gg.index.isin(chosen)]
@@ -653,7 +684,10 @@ def mark_and_race_features(horses, k):
             row[f"r{i+1}"] = float(scores[i]) if i < len(scores) else np.nan
         rows.append(row)
         marked_parts.append(gg)
-    return pd.DataFrame(rows), pd.concat(marked_parts, ignore_index=True)
+    if short_races:
+        print(f"[scan] skipped_short_races={short_races}", flush=True)
+    marked = pd.concat(marked_parts, ignore_index=True) if marked_parts else pd.DataFrame()
+    return pd.DataFrame(rows), marked
 
 
 def choose_scan(oof):
@@ -850,7 +884,7 @@ def build_manifest(root: Path):
 
 
 def make_runtime_zip(root: Path):
-    target = root / "output" / "JRA_ADULT_DIRT_RUNTIME_V2.zip"
+    target = root / "output" / "JRA_ADULT_DIRT_RUNTIME_V2_1.zip"
     if target.exists():
         target.unlink()
     with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as z:
@@ -921,7 +955,7 @@ def run_training(root: Path):
         runtime_zip = make_runtime_zip(root)
         runtime_sha = sha256_file(runtime_zip)
         summary = {
-            "version": "JRA_ADULT_DIRT_RUNTIME_V2",
+            "version": "JRA_ADULT_DIRT_RUNTIME_V2_1",
             "eligible_cells": len(eligible),
             "adopt_cells": int((reg.get("status") == "ADOPT").sum()) if not reg.empty else 0,
             "skip_cells": int((reg.get("status") == "SKIP").sum()) if not reg.empty else 0,
