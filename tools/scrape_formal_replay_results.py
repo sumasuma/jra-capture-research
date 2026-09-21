@@ -43,70 +43,84 @@ def cell_text(tr, cls):
     return td.get_text(" ",strip=True) if td else ""
 
 def scrape_one(race_id12, date, venue):
-    url=f"https://race.netkeiba.com/race/result.html?race_id={race_id12}"
+    # Static DB page is used intentionally. The race.netkeiba result page is
+    # JS-driven and can return an empty shell to requests.
+    url=f"https://db.netkeiba.com/race/{race_id12}/"
     rr=requests.get(url,headers=UA,timeout=30)
     rr.raise_for_status()
     rr.encoding=rr.apparent_encoding or rr.encoding
     soup=BeautifulSoup(rr.text,"html.parser")
-    title=(soup.select_one(".RaceName") or soup.select_one("h1"))
-    title=title.get_text(" ",strip=True) if title else ""
-    d1=soup.select_one(".RaceData01")
-    meta=d1.get_text(" ",strip=True) if d1 else ""
-    md=re.search(r"(芝|ダ|障)(\d+)m",meta)
+
+    intro=soup.select_one(".data_intro")
+    title_el=(intro.select_one("h1") if intro else None) or soup.select_one("h1")
+    title=title_el.get_text(" ",strip=True) if title_el else ""
+    meta=intro.get_text(" ",strip=True) if intro else soup.get_text(" ",strip=True)[:1200]
+
+    md=re.search(r"(芝|ダート|ダ|障害|障)[^0-9]{0,12}(\d+)m",meta)
     if not md:
-        return {"audit":{"race_id12":race_id12,"url":url,"status":"NO_DISTANCE","title":title,"meta":meta},"rows":[]}
-    surface=md.group(1); distance=int(md.group(2))
-    if surface=="障" or "障害" in title or "障害" in meta:
-        return {"audit":{"race_id12":race_id12,"url":url,"status":"SKIP_OBSTACLE","title":title,"meta":meta},"rows":[]}
-    gm=re.search(r"馬場:([^\s/]+)",meta)
-    going=gm.group(1) if gm else ""
-    table=soup.select_one("table.RaceTable01") or soup.select_one("table")
+        return {"audit":{"race_id12":race_id12,"url":url,"status":"NO_DISTANCE","title":title,"meta":meta[:500]},"rows":[]}
+    raw_surface=md.group(1)
+    surface="ダ" if raw_surface in {"ダート","ダ"} else ("障" if raw_surface in {"障害","障"} else "芝")
+    distance=int(md.group(2))
+    if surface=="障" or "障害" in title:
+        return {"audit":{"race_id12":race_id12,"url":url,"status":"SKIP_OBSTACLE","title":title,"meta":meta[:500]},"rows":[]}
+
+    # Static page metadata looks like "... 芝 : 重 ..." or "... ダート : 良 ...".
+    gm=re.search(r"(?:芝|ダート|ダ)\s*[:：]\s*([^\s/]+)",meta)
+    going=gm.group(1).strip() if gm else ""
+
+    table=soup.select_one("table.race_table_01")
     if table is None:
-        return {"audit":{"race_id12":race_id12,"url":url,"status":"NO_TABLE","title":title,"meta":meta},"rows":[]}
+        for cand in soup.find_all("table"):
+            if cand.select_one('a[href*="/horse/"]'):
+                table=cand
+                break
+    if table is None:
+        return {"audit":{"race_id12":race_id12,"url":url,"status":"NO_TABLE","title":title,"meta":meta[:500]},"rows":[]}
+
     rows=[]
-    result_rows=table.select("tr.HorseList")
-    if not result_rows:
-        result_rows=[tr for tr in table.find_all("tr") if tr.select_one('a[href*="/horse/"]')]
+    result_rows=[tr for tr in table.find_all("tr") if tr.select_one('a[href*="/horse/"]')]
     for tr in result_rows:
-        # netkeiba occasionally changes/omits td class names. Keep the
-        # semantic-class path, with a stable positional fallback.
         tds=tr.find_all("td", recursive=False)
+        if len(tds) < 8:
+            continue
         def pos(i):
             return tds[i].get_text(" ",strip=True) if 0 <= i < len(tds) else ""
 
-        rank=cell_text(tr,"Rank") or pos(0)
-        rank=str(rank).strip()
-        if not rank.isdigit(): continue
+        rank=pos(0)
+        if not rank.isdigit():
+            continue
         finish=int(rank)
 
-        no=cell_text(tr,"Num.Txt_C") or cell_text(tr,"Num")
-        if not str(no).strip().isdigit():
-            no=pos(2)
-        if not str(no).strip().isdigit(): continue
-        horse_no=int(str(no).strip())
+        no=pos(2)
+        if not no.isdigit():
+            continue
+        horse_no=int(no)
 
-        hi=tr.select_one("td.Horse_Info")
-        if hi is None and len(tds) > 3:
-            hi=tds[3]
-        ha=hi.select_one('a[href*="/horse/"]') if hi else None
-        if ha is None: continue
+        hi=tds[3]
+        ha=hi.select_one('a[href*="/horse/"]')
+        if ha is None:
+            continue
         horse_name=ha.get_text(" ",strip=True)
-        hm=re.search(r"/horse/(\\d+)",ha.get("href",""))
-        if not hm: continue
+        hm=re.search(r"/horse/(\d+)",ha.get("href",""))
+        if not hm:
+            continue
         horse_id=hm.group(1)
 
-        barei=cell_text(tr,"Barei") or pos(4)
-        am=re.search(r"(\\d+)",barei)
+        barei=pos(4)
+        am=re.search(r"(\d+)",barei)
         age=int(am.group(1)) if am else None
 
-        wt=cell_text(tr,"Weight") or pos(5)
-        wtm=re.search(r"(\\d+(?:\\.\\d+)?)",wt)
+        wt=pos(5)
+        wtm=re.search(r"(\d+(?:\.\d+)?)",wt)
         carried=float(wtm.group(1)) if wtm else None
 
-        jk=cell_text(tr,"Jockey") or pos(6)
-        tm=cell_text(tr,"Time") or pos(7)
+        jk=pos(6)
+        tm=pos(7)
         actual=sec(tm)
-        if actual is None: continue
+        if actual is None:
+            continue
+
         rows.append({
             "race_id16":date.replace("-","")+race_id12[4:],
             "date":date,
@@ -126,7 +140,7 @@ def scrape_one(race_id12, date, venue):
             "source_url":url,
         })
     status="PASS" if len(rows)>=6 and sum(x["finish"]==1 for x in rows)==1 else "SKIP_INVALID_FIELD"
-    return {"audit":{"race_id12":race_id12,"url":url,"status":status,"title":title,"meta":meta,"valid_finishers":len(rows)},"rows":rows if status=="PASS" else []}
+    return {"audit":{"race_id12":race_id12,"url":url,"status":status,"title":title,"meta":meta[:500],"valid_finishers":len(rows)},"rows":rows if status=="PASS" else []}
 
 def main():
     out=[]; audits=[]
