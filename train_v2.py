@@ -932,6 +932,71 @@ def make_runtime_zip(root: Path):
     return target
 
 
+def finalize_existing_v2_3(root: Path):
+    root = Path(root)
+    reg_path = root / "output" / "REGISTRY.csv"
+    status_path = root / "output" / "status.json"
+    if not reg_path.exists():
+        raise RuntimeError("cannot finalize: REGISTRY.csv missing")
+
+    reg = pd.read_csv(reg_path)
+    eligible_expected = None
+    if status_path.exists():
+        try:
+            s = json.loads(status_path.read_text(encoding="utf-8"))
+            eligible_expected = s.get("eligible_cells")
+        except Exception:
+            eligible_expected = None
+    if eligible_expected is None:
+        eligible_expected = len(reg)
+
+    if len(reg) != int(eligible_expected):
+        raise RuntimeError(
+            f"cannot finalize incomplete registry rows={len(reg)} expected={eligible_expected}"
+        )
+
+    # Reclaim persistent-volume space. Training is complete, so these caches and
+    # invalid pre-v2.3 archives are no longer required to reproduce inference.
+    for p in [
+        root / "cache",
+        root / "archive_invalid_pre_v2_3",
+        root / "archive_invalid_v2",
+    ]:
+        if p.exists():
+            print(f"[finalize] removing {p}", flush=True)
+            shutil.rmtree(p)
+
+    runtime_zip = root / "output" / "JRA_ADULT_DIRT_RUNTIME_V2_3.zip"
+    runtime_zip.unlink(missing_ok=True)
+    runtime_zip.with_suffix(runtime_zip.suffix + ".part").unlink(missing_ok=True)
+
+    build_manifest(root)
+    runtime_zip = make_runtime_zip(root)
+    runtime_sha = sha256_file(runtime_zip)
+
+    status_counts = reg["status"].fillna("UNKNOWN").value_counts().to_dict()
+    summary = {
+        "version": "JRA_ADULT_DIRT_RUNTIME_V2_3",
+        "eligible_cells": int(len(reg)),
+        "adopt_cells": int((reg["status"] == "ADOPT").sum()),
+        "skip_cells": int((reg["status"] == "SKIP").sum()),
+        "skip_rank_cells": int((reg["status"] == "SKIP_RANK").sum()),
+        "error_cells": int((reg["status"] == "ERROR").sum()),
+        "status_counts": {str(k): int(v) for k, v in status_counts.items()},
+        "runtime_zip": runtime_zip.name,
+        "runtime_bytes": int(runtime_zip.stat().st_size),
+        "runtime_sha256": runtime_sha,
+        "odds_popularity_used": False,
+        "finalized_from_existing_registry": True,
+    }
+    (root / "output" / "SUMMARY.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    write_status(root, phase="COMPLETE", complete=True, summary=summary)
+    print("[complete]", json.dumps(summary, ensure_ascii=False), flush=True)
+    return summary
+
+
 def prepare_v2_3_workspace(root: Path):
     expected = "JRA_ADULT_DIRT_RUNTIME_V2_3"
     status_path = root / "output" / "status.json"
