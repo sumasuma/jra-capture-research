@@ -84,8 +84,8 @@ def maybe_start_training():
         try:
             s = json.loads(status.read_text(encoding="utf-8"))
             version = (s.get("summary") or {}).get("version")
-            if s.get("complete") and version == "JRA_ADULT_DIRT_RUNTIME_V2_2":
-                print("[train] v2.2 already complete; not restarting", flush=True)
+            if s.get("complete") and version == "JRA_ADULT_DIRT_RUNTIME_V2_3":
+                print("[train] v2.3 already complete; not restarting", flush=True)
                 return
         except Exception:
             pass
@@ -137,7 +137,7 @@ def summary():
 
 @app.get("/download/runtime")
 def download_runtime():
-    p = OUTPUT / "JRA_ADULT_DIRT_RUNTIME_V2_2.zip"
+    p = OUTPUT / "JRA_ADULT_DIRT_RUNTIME_V2_3.zip"
     if not p.exists():
         raise HTTPException(status_code=404, detail="runtime not ready")
     return FileResponse(p, media_type="application/zip", filename=p.name)
