@@ -911,10 +911,38 @@ def make_runtime_zip(root: Path):
     return target
 
 
-def run_training(root: Path):
-    root = Path(root)
+def prepare_v2_2_workspace(root: Path):
+    expected = "JRA_ADULT_DIRT_RUNTIME_V2_2"
+    status_path = root / "output" / "status.json"
+    existing_version = None
+    if status_path.exists():
+        try:
+            s = json.loads(status_path.read_text(encoding="utf-8"))
+            existing_version = (s.get("summary") or {}).get("version")
+        except Exception:
+            existing_version = None
+
+    # If this volume still contains the invalid pre-v2.2 artifacts, isolate them
+    # automatically. Input data and cache are intentionally preserved.
+    if existing_version != expected:
+        archive = root / "archive_invalid_v2"
+        archive.mkdir(parents=True, exist_ok=True)
+        for name in ["models", "output"]:
+            src = root / name
+            if not src.exists():
+                continue
+            dst = archive / f"{name}_pre_v2_2"
+            if dst.exists():
+                shutil.rmtree(dst)
+            shutil.move(str(src), str(dst))
+
     (root / "output").mkdir(parents=True, exist_ok=True)
     (root / "models").mkdir(parents=True, exist_ok=True)
+
+
+def run_training(root: Path):
+    root = Path(root)
+    prepare_v2_2_workspace(root)
     write_status(root, phase="STARTING", complete=False, error=None)
     try:
         zip_path = root / "input" / "central.zip"
