@@ -1,0 +1,22 @@
+name: Scrape Formal Replay Results
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tools/scrape_formal_replay_results.py"
+      - ".github/workflows/scrape-formal-replay.yml"
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install requests beautifulsoup4 pandas
+      - run: python tools/scrape_formal_replay_results.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: formal-replay-results-20260912-13-19
+          path: artifacts/
+          retention-days: 30
