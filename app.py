@@ -8,9 +8,9 @@ import zipfile
 from pathlib import Path
 
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 
-from train_v2 import run_training
+from train_v2 import finalize_existing_v2_3, run_training
 
 ROOT = Path(os.environ.get("JRA_WORKDIR", "/data/jra"))
 INPUT = ROOT / "input"
@@ -87,8 +87,24 @@ def maybe_start_training():
             if s.get("complete") and version == "JRA_ADULT_DIRT_RUNTIME_V2_3":
                 print("[train] v2.3 already complete; not restarting", flush=True)
                 return
-        except Exception:
-            pass
+
+            # If all cell results already exist and only final ZIP creation failed,
+            # finalize in place. Never retrain those completed cells.
+            reg_path = OUTPUT / "REGISTRY.csv"
+            expected = int(s.get("eligible_cells") or 0)
+            if reg_path.exists() and expected > 0:
+                import pandas as pd
+                rows = len(pd.read_csv(reg_path))
+                if rows == expected:
+                    TRAIN_THREAD = threading.Thread(
+                        target=finalize_existing_v2_3, args=(ROOT,), daemon=True
+                    )
+                    TRAIN_THREAD.start()
+                    print(f"[finalize] existing registry complete rows={rows}; finalizing only", flush=True)
+                    return
+        except Exception as exc:
+            print(f"[startup-check:error] {exc!r}", flush=True)
+
     if TRAIN_THREAD and TRAIN_THREAD.is_alive():
         return
     TRAIN_THREAD = threading.Thread(target=run_training, args=(ROOT,), daemon=True)
@@ -125,6 +141,14 @@ def status():
     if not p.exists():
         return {"phase": "NOT_STARTED", "complete": False}
     return json.loads(p.read_text(encoding="utf-8"))
+
+
+@app.get("/registry", response_class=PlainTextResponse)
+def registry():
+    p = OUTPUT / "REGISTRY.csv"
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="registry not ready")
+    return p.read_text(encoding="utf-8")
 
 
 @app.get("/summary")
