@@ -86,6 +86,16 @@ def maybe_start_training():
             version = (s.get("summary") or {}).get("version")
             if s.get("complete") and version == "JRA_ADULT_DIRT_RUNTIME_V2_3":
                 print("[train] v2.3 already complete; not restarting", flush=True)
+                reg_path = OUTPUT / "REGISTRY.csv"
+                if reg_path.exists():
+                    try:
+                        import pandas as pd
+                        reg = pd.read_csv(reg_path)
+                        adopted = reg[reg["status"] == "ADOPT"]
+                        print("[registry:adopt] " + adopted.to_json(orient="records", force_ascii=False), flush=True)
+                        print("[registry:status_counts] " + reg["status"].value_counts().to_json(force_ascii=False), flush=True)
+                    except Exception as exc:
+                        print(f"[registry:audit:error] {exc!r}", flush=True)
                 return
 
             # If all cell results already exist and only final ZIP creation failed,
